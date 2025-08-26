@@ -143,3 +143,103 @@
                           current-list)),  ;; If append fails, keep current list
       target: (get target acc)
     }))
+
+;; Create a challenge between clans
+(define-public (create-challenge (challenger-id uint) (challenged-id uint) (stake uint))
+  (let (
+    (challenger (unwrap! (map-get? clans challenger-id) ERR-CLAN-NOT-FOUND))
+    (challenged (unwrap! (map-get? clans challenged-id) ERR-CLAN-NOT-FOUND))
+    (challenge-id (var-get next-challenge-id))
+  )
+    (asserts! (is-eq tx-sender (get leader challenger)) ERR-NOT-AUTHORIZED)
+    (asserts! (and (get active challenger) (get active challenged)) ERR-INVALID-STATUS)
+    (asserts! (> stake u0) ERR-INSUFFICIENT-FUNDS)
+    
+    (try! (stx-transfer? stake tx-sender (as-contract tx-sender)))
+    
+    (map-set challenges challenge-id {
+      challenger: challenger-id,
+      challenged: challenged-id,
+      stake: stake,
+      status: "pending",
+      winner: none,
+      created-at: burn-block-height
+    })
+    
+    (var-set next-challenge-id (+ challenge-id u1))
+    (ok challenge-id)))
+
+;; Accept a challenge
+(define-public (accept-challenge (challenge-id uint))
+  (let (
+    (challenge (unwrap! (map-get? challenges challenge-id) ERR-CHALLENGE-NOT-FOUND))
+    (challenged-clan (unwrap! (map-get? clans (get challenged challenge)) ERR-CLAN-NOT-FOUND))
+  )
+    (asserts! (is-eq tx-sender (get leader challenged-clan)) ERR-NOT-AUTHORIZED)
+    (asserts! (is-eq (get status challenge) "pending") ERR-INVALID-STATUS)
+    
+    (try! (stx-transfer? (get stake challenge) tx-sender (as-contract tx-sender)))
+    
+    (map-set challenges challenge-id (merge challenge {status: "active"}))
+    (ok true)))
+
+;; Cancel pending challenge
+(define-public (cancel-challenge (challenge-id uint))
+  (let (
+    (challenge (unwrap! (map-get? challenges challenge-id) ERR-CHALLENGE-NOT-FOUND))
+    (challenger-clan (unwrap! (map-get? clans (get challenger challenge)) ERR-CLAN-NOT-FOUND))
+  )
+    (asserts! (is-eq (get status challenge) "pending") ERR-INVALID-STATUS)
+    (asserts! (is-eq tx-sender (get leader challenger-clan)) ERR-NOT-AUTHORIZED)
+    
+    ;; Refund stake to challenger
+    (try! (as-contract (stx-transfer? (get stake challenge) tx-sender (get leader challenger-clan))))
+    
+    (map-set challenges challenge-id (merge challenge {status: "cancelled"}))
+    (ok true)))
+
+;; Report challenge result
+(define-public (report-result (challenge-id uint) (winner-id uint))
+  (let (
+    (challenge (unwrap! (map-get? challenges challenge-id) ERR-CHALLENGE-NOT-FOUND))
+    (challenger-clan (unwrap! (map-get? clans (get challenger challenge)) ERR-CLAN-NOT-FOUND))
+    (challenged-clan (unwrap! (map-get? clans (get challenged challenge)) ERR-CLAN-NOT-FOUND))
+  )
+    (asserts! (is-eq (get status challenge) "active") ERR-INVALID-STATUS)
+    (asserts! (or (is-eq tx-sender (get leader challenger-clan)) 
+                  (is-eq tx-sender (get leader challenged-clan))) ERR-NOT-AUTHORIZED)
+    (asserts! (or (is-eq winner-id (get challenger challenge))
+                  (is-eq winner-id (get challenged challenge))) ERR-NOT-AUTHORIZED)
+    
+    (let (
+      (loser-id (if (is-eq winner-id (get challenger challenge))
+                    (get challenged challenge)
+                    (get challenger challenge)))
+      (winner-clan (unwrap! (map-get? clans winner-id) ERR-CLAN-NOT-FOUND))
+      (loser-clan (unwrap! (map-get? clans loser-id) ERR-CLAN-NOT-FOUND))
+      (total-stake (* (get stake challenge) u2))
+    )
+      ;; Update winner stats
+      (map-set clans winner-id (merge winner-clan {
+        wins: (+ (get wins winner-clan) u1),
+        rank-points: (+ (get rank-points winner-clan) u50)
+      }))
+      
+      ;; Update loser stats
+      (map-set clans loser-id (merge loser-clan {
+        losses: (+ (get losses loser-clan) u1),
+        rank-points: (if (>= (get rank-points loser-clan) u25)
+                         (- (get rank-points loser-clan) u25)
+                         u0)
+      }))
+      
+      ;; Transfer winnings to winner clan leader
+      (try! (as-contract (stx-transfer? total-stake tx-sender (get leader winner-clan))))
+      
+      ;; Update challenge
+      (map-set challenges challenge-id (merge challenge {
+        status: "completed",
+        winner: (some winner-id)
+      }))
+      
+      (ok true))))
