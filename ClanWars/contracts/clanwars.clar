@@ -243,3 +243,76 @@
       }))
       
       (ok true))))
+
+;; Distribute season rewards
+(define-public (distribute-season-rewards (clan-id uint))
+  (let (
+    (clan (unwrap! (map-get? clans clan-id) ERR-CLAN-NOT-FOUND))
+    (season (var-get season-number))
+  )
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    (asserts! (is-none (map-get? season-rewards {season: season, clan-id: clan-id})) ERR-INVALID-STATUS)
+    
+    (let ((reward (calculate-season-reward (get rank-points clan))))
+      (try! (as-contract (stx-transfer? reward tx-sender (get leader clan))))
+      (map-set season-rewards {season: season, clan-id: clan-id} reward)
+      (ok reward))))
+
+;; Start new season
+(define-public (start-new-season)
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    (var-set season-number (+ (var-get season-number) u1))
+    (ok (var-get season-number))))
+
+;; Helper function for reward calculation
+(define-private (calculate-season-reward (rank-points uint))
+  (if (>= rank-points u2000)
+      u10000000  ;; 10 STX for top tier
+      (if (>= rank-points u1500)
+          u5000000   ;; 5 STX for high tier
+          (if (>= rank-points u1000)
+              u1000000   ;; 1 STX for mid tier
+              u0))))     ;; No reward for low tier
+
+;; Read-only Functions
+(define-read-only (get-clan (clan-id uint))
+  (map-get? clans clan-id))
+
+(define-read-only (get-clan-by-name (name (string-ascii 50)))
+  (let ((clan-id (map-get? clan-names name)))
+    (match clan-id
+      id (map-get? clans id)
+      none)))
+
+(define-read-only (get-challenge (challenge-id uint))
+  (map-get? challenges challenge-id))
+
+(define-read-only (get-member-clan (member principal))
+  (map-get? member-clans member))
+
+(define-read-only (get-leaderboard-position (clan-id uint))
+  (let ((clan (unwrap! (map-get? clans clan-id) (err u0))))
+    (ok (get rank-points clan))))
+
+(define-read-only (get-season-reward (season uint) (clan-id uint))
+  (map-get? season-rewards {season: season, clan-id: clan-id}))
+
+(define-read-only (get-current-season)
+  (var-get season-number))
+
+(define-read-only (get-clan-stats (clan-id uint))
+  (let ((clan (map-get? clans clan-id)))
+    (match clan
+      c (ok {
+        wins: (get wins c),
+        losses: (get losses c),
+        rank-points: (get rank-points c),
+        win-rate: (if (> (+ (get wins c) (get losses c)) u0)
+                     (/ (* (get wins c) u100) (+ (get wins c) (get losses c)))
+                     u0)
+      })
+      ERR-CLAN-NOT-FOUND)))
+
+(define-read-only (get-pending-challenges (clan-id uint))
+  (ok "Function to return pending challenges - implementation depends on indexing strategy"))
